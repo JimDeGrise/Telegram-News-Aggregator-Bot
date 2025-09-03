@@ -31,7 +31,9 @@ HELP_TEXT = (
     "/source &lt;источник&gt; — новости конкретного источника (|2 для страницы 2)\n"
     "/sources — список источников\n"
     "/stats — статистика по источникам\n"
-#    "/fetch — принудительный сбор (админ)\n\n"
+    "/arc_filter [source] [YYYY-MM] [limit] — просмотр архива (если аргументы не указаны — справка + список месяцев)\n"
+    "/src_stat — статистика по архиву (по месяцам и суммарно)\n"
+    #    "/fetch — принудительный сбор (админ)\n\n"
     "Навигация:\n"
     "- В списках: «Пред» / «След» / «Закрыть»\n"
     "- В одиночном просмотре (/news): «⏮ Перв.» «« Пред» «След » «Посл. ⏭» + «✖ Закрыть».\n"
@@ -403,7 +405,7 @@ def setup_handlers(
 
     @router.message(Command("filter"))
     async def filter_cmd(message: Message):
-        raw_part = message.text[len("/filter"):].strip()
+        raw_part = message.text[len("/filter"):]\n.strip()
         if not raw_part:
             await message.answer("Пустой запрос.")
             return
@@ -443,7 +445,7 @@ def setup_handlers(
 
     @router.message(Command("source"))
     async def source_cmd(message: Message):
-        raw_part = message.text[len("/source"):].strip()
+        raw_part = message.text[len("/source"):]\n.strip()
         if not raw_part:
             await message.answer("Использование: /source <источник> | пример: /source meduza |2")
             return
