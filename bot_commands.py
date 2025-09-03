@@ -7,10 +7,11 @@ from aiogram.types import (
 )
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
-from typing import Callable, Dict, List, Set, Tuple, Optional
+from typing import Callable, Dict, List, Set, Optional
 import hashlib
 import html
 import re
+import inspect
 
 try:
     from search_parser import parse_user_query, split_positive_negative
@@ -21,23 +22,26 @@ except ImportError:
 router = Router()
 
 HELP_TEXT = (
-    "Бот агрегирует RSS независимых медиа, возможен поиск (FTS / логические операторы).\n\n"
+    "Бот агрегирует RSS независимых медиа, доступен полнотекстовый поиск (FTS5: AND OR NOT, знак минус -, фразы в \"\").\n\n"
     "Команды:\n"
     "/start — краткая справка\n"
     "/help — эта справка\n"
-    "/latest — последние фиксированное число новостей (списком)\n"
-    "/news [N] — показать одну новость (по умолчанию первую). N — номер (1-based)\n"
-    "/filter &lt;запрос&gt; — поиск (AND OR NOT, минус -, фразы в \"\") | /filter запрос |2 для 2-й страницы\n"
-    "/source &lt;источник&gt; — новости конкретного источника (|2 для страницы 2)\n"
-    "/sources — список источников\n"
-    "/stats — статистика по источникам\n"
-    "/arc_filter [source] [YYYY-MM] [limit] — просмотр архива (если аргументы не указаны — справка + список месяцев)\n"
-    "/src_stat — статистика по архиву (по месяцам и суммарно)\n"
-    #    "/fetch — принудительный сбор (админ)\n\n"
+    "/latest — последние N (фиксированно) новостей списком с пагинацией\n"
+    "/news [N] — показать одну новость (по умолчанию 1-я). N — порядковый номер (1-based)\n"
+    "/filter &lt;запрос&gt; |p — поиск (p — страница). Пример: /filter кризис AND экономика |2\n"
+    "/source &lt;источник&gt; |p — новости одного источника. Пример: /source meduza |3\n"
+    "/sources — список источников с количеством\n"
+    "/stats — текущая статистика по источникам (основная БД)\n"
+    "/arc_filter [source] [YYYY-MM] [limit] — просмотр архива. Без аргументов покажет подсказку и доступные месяцы.\n"
+    "    Примеры: /arc_filter 2025-08 5 | /arc_filter reuters 2025-07 | /arc_filter reuters 5\n"
+    "/src_stat — статистика по архиву (по месяцам и общий топ источников)\n"
+    "/arc_months — список доступных архивных месяцев\n"
+    "/archive_now — запуск ручной архивации (админ)\n"
+#   "/fetch — принудительный сбор (админ)\n\n"
     "Навигация:\n"
-    "- В списках: «Пред» / «След» / «Закрыть»\n"
-    "- В одиночном просмотре (/news): «⏮ Перв.» «« Пред» «След » «Посл. ⏭» + «✖ Закрыть».\n"
-    "Скобки ( ) в поиске не поддерживаются (ограничение FTS5)."
+    "- В списках: « Пред / След » / Закрыть\n"
+    "- В одиночной новости: ⏮ Перв. / « Пред / След » / Посл. ⏭ + ✖ Закрыть\n"
+    "Особенности поиска: скобки ( ) не поддерживаются (FTS5). Фразы — в кавычках. Минус перед словом — исключение."
 )
 
 class LatestPage(CallbackData, prefix="lp"):
@@ -63,6 +67,7 @@ MULTISPACE_RE = re.compile(r"[ \t\r\f\v]+")
 NEWLINE_RE = re.compile(r"\n{3,}")
 NBSP_RE = re.compile(r"\u00A0")
 
+
 def clean_text(raw: str) -> str:
     if not raw:
         return ""
@@ -75,8 +80,10 @@ def clean_text(raw: str) -> str:
     txt = txt.strip()
     return html.escape(txt)
 
+
 def safe_join(parts):
     return "\n\n".join(p for p in parts if p)
+
 
 def build_highlight_patterns(raw_query: str) -> List[str]:
     patterns: Set[str] = set()
@@ -100,6 +107,7 @@ def build_highlight_patterns(raw_query: str) -> List[str]:
             patterns.add(original.replace("-", " "))
     return sorted(patterns, key=len, reverse=True)
 
+
 def highlight_html(escaped_text: str, patterns: List[str]) -> str:
     if not patterns or not escaped_text:
         return escaped_text
@@ -109,9 +117,10 @@ def highlight_html(escaped_text: str, patterns: List[str]) -> str:
             continue
         rx = re.compile(r'(?i)(' + re.escape(pat) + r')')
         def repl(m):
-            return f"<b>{m.group(1)}</b>"
+            return f"<b>{{m.group(1)}}</b>"
         text = rx.sub(repl, text)
     return text
+
 
 def make_summary_snippet(summary: str, patterns: List[str], max_len: int = 180) -> str:
     if not summary or not patterns:
@@ -133,21 +142,23 @@ def make_summary_snippet(summary: str, patterns: List[str], max_len: int = 180) 
         snippet = snippet + "…"
     return highlight_html(snippet, patterns)
 
+
 def format_item_line(item: dict, idx: int, patterns: Optional[List[str]] = None, include_summary=False) -> str:
     title = clean_text(item.get('title') or "")
     if patterns:
         title = highlight_html(title, patterns)
     source = clean_text(item.get('source') or "")
     published = clean_text(item.get('published') or "")
-    line = f"{idx}. [{source}] {title}"
+    line = f"{{idx}}. [{{source}}] {{title}}"
     if published:
-        line += f"\n{published}"
+        line += f"\n{{published}}"
     if include_summary:
         raw_summary = clean_text(item.get('summary') or "")
         snippet = make_summary_snippet(raw_summary, patterns or [])
         if snippet:
-            line += f"\n{snippet}"
+            line += f"\n{{snippet}}"
     return line
+
 
 def build_search_page_text(items: list, offset: int, limit: int, total: int,
                            header: str, patterns: List[str]) -> str:
@@ -156,28 +167,30 @@ def build_search_page_text(items: list, offset: int, limit: int, total: int,
     current_page = (offset // limit) + 1
     if not items:
         if total == 0:
-            return f"{header}\nНет данных."
-        return f"{header}\nСтр. {current_page}/{total_pages} пустая."
-    lines = [f"{header}\nРезультаты {offset+1}–{offset+len(items)} из {total} (стр. {current_page}/{total_pages})"]
+            return f"{{header}}\nНет данных."
+        return f"{{header}}\nСтр. {{current_page}}/{{total_pages}} пустая."
+    lines = [f"{{header}}\nРезультаты {{offset+1}}–{{offset+len(items)}} из {{total}} (стр. {{current_page}}/{{total_pages}})"]
     for i, it in enumerate(items, start=1):
         lines.append(format_item_line(it, offset + i, patterns, include_summary=True))
     return "\n\n".join(lines)
+
 
 def build_page_text(items: list, offset: int, limit: int, total: int, header: str) -> str:
     header = clean_text(header)
     if not items:
         if total == 0:
-            return f"{header}\nНет данных."
-        return f"{header}\nЭта страница пуста."
-    lines = [f"{header}\nПозиции {offset+1}–{offset+len(items)} из {total}"]
+            return f"{{header}}\nНет данных."
+        return f"{{header}}\nЭта страница пуста."
+    lines = [f"{{header}}\nПозиции {{offset+1}}–{{offset+len(items)}} из {{total}}"]
     for i, it in enumerate(items, start=1):
         lines.append(format_item_line(it, offset + i))
     return "\n\n".join(lines)
 
+
 def build_news_keyboard(items: list, offset: int, limit: int, total: int):
     buttons = []
     for i, it in enumerate(items, start=1):
-        buttons.append([InlineKeyboardButton(text=f"🔗 {offset + i}", url=it["link"])])
+        buttons.append([InlineKeyboardButton(text=f"🔗 {{offset + i}}", url=it["link"])])
     has_prev = offset > 0
     has_next = (offset + limit) < total
     nav_row = []
@@ -200,10 +213,11 @@ def build_news_keyboard(items: list, offset: int, limit: int, total: int):
     buttons.append([InlineKeyboardButton(text="✖ Закрыть", callback_data="lp:close")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def build_search_keyboard(items: list, key: str, offset: int, limit: int, total: int):
     buttons = []
     for i, it in enumerate(items, start=1):
-        buttons.append([InlineKeyboardButton(text=f"🔗 {offset + i}", url=it["link"])])
+        buttons.append([InlineKeyboardButton(text=f"🔗 {{offset + i}}", url=it["link"])])
     has_prev = offset > 0
     has_next = (offset + limit) < total
     nav_row = []
@@ -226,10 +240,11 @@ def build_search_keyboard(items: list, key: str, offset: int, limit: int, total:
     buttons.append([InlineKeyboardButton(text="✖ Закрыть", callback_data="fs:close")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def build_source_keyboard(items: list, key: str, offset: int, limit: int, total: int):
     buttons = []
     for i, it in enumerate(items, start=1):
-        buttons.append([InlineKeyboardButton(text=f"🔗 {offset + i}", url=it["link"])])
+        buttons.append([InlineKeyboardButton(text=f"🔗 {{offset + i}}", url=it["link"])])
     has_prev = offset > 0
     has_next = (offset + limit) < total
     nav_row = []
@@ -252,18 +267,20 @@ def build_source_keyboard(items: list, key: str, offset: int, limit: int, total:
     buttons.append([InlineKeyboardButton(text="✖ Закрыть", callback_data="sp:close")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def build_single_news_text(item: dict, idx: int, total: int) -> str:
     title = clean_text(item.get("title") or "")
     source = clean_text(item.get("source") or "")
     published = clean_text(item.get("published") or "")
     summary = clean_text(item.get("summary") or "")
     parts = [
-        f"Новость {idx+1} из {total}",
-        f"[{source}] {title}",
+        f"Новость {{idx+1}} из {{total}}",
+        f"[{{source}}] {{title}}",
         published,
         summary
     ]
     return safe_join(parts)
+
 
 def build_single_news_keyboard(item: dict, idx: int, total: int):
     buttons = []
@@ -308,6 +325,15 @@ def build_single_news_keyboard(item: dict, idx: int, total: int):
     buttons.append([InlineKeyboardButton(text="✖ Закрыть", callback_data="ni:close")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+async def _maybe_call(func):
+    try:
+        if inspect.iscoroutinefunction(func):
+            return await func()
+        return func()
+    except Exception:
+        return None
+
+
 def setup_handlers(
     db,
     fetch_trigger: Callable,
@@ -334,7 +360,7 @@ def setup_handlers(
         limit = max(1, latest_count)
         items = db.latest(limit)
         total = db.total()
-        text = build_page_text(items, 0, limit, total, header=f"Последние {limit} новостей")
+        text = build_page_text(items, 0, limit, total, header=f"Последние {{limit}} новостей")
         kb = build_news_keyboard(items, 0, limit, total)
         await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
@@ -370,9 +396,9 @@ def setup_handlers(
     async def stats_cmd(message: Message):
         stats = db.count_by_source()
         total = db.total()
-        lines = [f"Всего новостей: {total}"]
+        lines = [f"Всего новостей: {{total}}"]
         for s in stats:
-            lines.append(f"{clean_text(s['source'])}: {s['count']}")
+            lines.append(f"{{clean_text(s['source'])}}: {{s['count']}}")
         await message.answer("\n".join(lines))
 
     @router.message(Command("sources"))
@@ -383,7 +409,7 @@ def setup_handlers(
             return
         lines = ["Источники (кол-во):"]
         for s in stats:
-            lines.append(f"- {clean_text(s['source'])} ({s['count']})")
+            lines.append(f"- {{clean_text(s['source'])}} ({{s['count']}})")
         await message.answer("\n".join(lines))
 
     @router.message(Command("fetch"))
@@ -397,11 +423,59 @@ def setup_handlers(
         if total_new == 0:
             await message.answer("Новых новостей не найдено.")
         else:
-            lines = [f"Новые новости: {total_new}"]
+            lines = [f"Новые новости: {{total_new}}"]
             for k, v in added_map.items():
                 if v:
-                    lines.append(f"- {clean_text(k)}: {v}")
+                    lines.append(f"- {{clean_text(k)}}: {{v}}")
             await message.answer("\n".join(lines))
+
+    @router.message(Command("arc_months"))
+    async def arc_months_cmd(message: Message):
+        months = None
+        for attr in ("list_archive_months", "archive_months", "list_arc_months"):
+            if hasattr(db, attr):
+                months = await _maybe_call(getattr(db, attr))
+                if months is not None:
+                    break
+        if not months:
+            await message.answer("Архив недоступен или нет данных.")
+            return
+        if isinstance(months, list):
+            extracted = []
+            for m in months:
+                if isinstance(m, dict):
+                    val = m.get("month") or m.get("m")
+                    if val:
+                        extracted.append(str(val))
+                else:
+                    extracted.append(str(m))
+            months = sorted(set(extracted))
+        await message.answer("Доступные месяцы:\n" + "\n".join(months[:200]))
+
+    @router.message(Command("archive_now"))
+    async def archive_now_cmd(message: Message):
+        if chat_id_admin and message.from_user and message.from_user.id != chat_id_admin:
+            await message.answer("Недостаточно прав.")
+            return
+        await message.answer("Запуск архивации...")
+        archiver = None
+        for attr in ("archive_now", "run_archive", "build_archive", "make_archive"):
+            if hasattr(db, attr):
+                archiver = getattr(db, attr)
+                break
+        if not archiver:
+            await message.answer("Функция архивации не найдена.")
+            return
+        result = await _maybe_call(archiver)
+        if result is None:
+            await message.answer("Архивация завершена (подробности недоступны).")
+        elif isinstance(result, dict):
+            lines = ["Архивация завершена:"]
+            for k, v in result.items():
+                lines.append(f"- {{clean_text(str(k))}}: {{v}}")
+            await message.answer("\n".join(lines))
+        else:
+            await message.answer(f"Архивация завершена: {{clean_text(str(result))}}")
 
     @router.message(Command("filter"))
     async def filter_cmd(message: Message):
@@ -438,7 +512,7 @@ def setup_handlers(
         offset = (page - 1) * limit
         rows, total = db.search(query, limit, offset)
         patterns = build_highlight_patterns(query)
-        header = f"Поиск: “{query}”"
+        header = f"Поиск: “{{query}}”"
         text = build_search_page_text(rows, offset, limit, total, header, patterns)
         kb = build_search_keyboard(rows, key, offset, limit, total)
         await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
@@ -447,7 +521,7 @@ def setup_handlers(
     async def source_cmd(message: Message):
         raw_part = message.text[len("/source"):]\n.strip()
         if not raw_part:
-            await message.answer("Использование: /source <источник> | пример: /source meduza |2")
+            await message.answer("Использование: /source &lt;источник&gt; | пример: /source meduza |2")
             return
         page = 1
         src = raw_part
@@ -463,12 +537,10 @@ def setup_handlers(
             await message.answer("Пустой источник.")
             return
 
-        # Попытка умного сопоставления (case-insensitive):
         stats = db.count_by_source()
         all_sources_lower = {s['source'].lower(): s['source'] for s in stats}
         exact = all_sources_lower.get(src.lower())
         if not exact:
-            # Поиск частичных совпадений
             candidates = [s['source'] for s in stats if src.lower() in s['source'].lower()]
             if not candidates:
                 await message.answer("Источник не найден. /sources для списка.")
@@ -476,10 +548,10 @@ def setup_handlers(
             if len(candidates) > 1:
                 lines = ["Найдено несколько источников:"]
                 for c in candidates[:20]:
-                    lines.append(f"- {clean_text(c)}")
+                    lines.append(f"- {{clean_text(c)}}")
                 if len(candidates) > 20:
                     lines.append("... (урезано)")
-                lines.append("Уточните: /source <точное_имя>")
+                lines.append("Уточните: /source &lt;точное_имя&gt;")
                 await message.answer("\n".join(lines))
                 return
             exact = candidates[0]
@@ -493,7 +565,7 @@ def setup_handlers(
         rows = db.source_news(exact, limit, offset)
         total_pages = max(1, (total + limit - 1) // limit)
         current_page = (offset // limit) + 1
-        header = f"Источник: [{exact}] (стр. {current_page}/{total_pages}, всего {total})"
+        header = f"Источник: [{exact}] (стр. {{current_page}}/{{total_pages}}, всего {{total}})"
         text = build_page_text(rows, offset, limit, total, header=header)
         kb = build_source_keyboard(rows, norm_key, offset, limit, total)
         await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
@@ -530,7 +602,6 @@ def setup_handlers(
             await cb.answer()
             return
 
-            # Search pagination
         if cb.data.startswith("fs:"):
             try:
                 data = FilterPage.unpack(cb.data)
@@ -546,7 +617,7 @@ def setup_handlers(
             raw_query = SEARCH_CACHE[key]
             rows, total = db.search(raw_query, limit, offset)
             patterns = build_highlight_patterns(raw_query)
-            header = f"Поиск: “{raw_query}”"
+            header = f"Поиск: “{{raw_query}}”"
             text = build_search_page_text(rows, offset, limit, total, header, patterns)
             kb = build_search_keyboard(rows, key, offset, limit, total)
             try:
@@ -573,7 +644,7 @@ def setup_handlers(
             rows = db.source_news(source, limit, offset)
             total_pages = max(1, (total + limit - 1) // limit)
             current_page = (offset // limit) + 1
-            header = f"Источник: [{clean_text(source)}] (стр. {current_page}/{total_pages}, всего {total})"
+            header = f"Источник: [{clean_text(source)}] (стр. {{current_page}}/{{total_pages}}, всего {{total}})"
             text = build_page_text(rows, offset, limit, total, header=header)
             kb = build_source_keyboard(rows, key, offset, limit, total)
             try:
