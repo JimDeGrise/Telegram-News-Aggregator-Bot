@@ -22,7 +22,7 @@ except ImportError:
 router = Router()
 
 HELP_TEXT = (
-    "Бот агрегирует RSS независимых медиа, доступен полнотекстовый поиск (FTS5: AND OR NOT, знак минус -, фразы в \"").\n\n"
+    "Бот агрегирует RSS независимых медиа, доступен полнотекстовый поиск (FTS5: AND OR NOT, знак минус -, фразы в \"\").\n\n"
     "Команды:\n"
     "/start — краткая справка\n"
     "/help — эта справка\n"
@@ -465,7 +465,8 @@ def setup_handlers(
 
     @router.message(Command("filter"))
     async def filter_cmd(message: Message):
-        raw_part = message.text[len("/filter"):]\n        if not raw_part:
+        raw_part = message.text[len("/filter"):]
+        if not raw_part:
             await message.answer("Пустой запрос.")
             return
         page = 1
@@ -504,7 +505,8 @@ def setup_handlers(
 
     @router.message(Command("source"))
     async def source_cmd(message: Message):
-        raw_part = message.text[len("/source"):]\n        if not raw_part:
+        raw_part = message.text[len("/source"):]
+        if not raw_part:
             await message.answer("Использование: /source &lt;источник&gt; | пример: /source meduza |2")
             return
         page = 1
