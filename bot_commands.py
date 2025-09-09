@@ -336,11 +336,6 @@ def setup_handlers(
     SEARCH_CACHE: Dict[str, str] = {}
     SOURCE_CACHE: Dict[str, str] = {}
 
-    @router.message(Command("help"))
-    @router.message(Command("start"))
-    async def help_cmd(message: Message):
-        await message.answer(HELP_TEXT)
-
     @router.message(Command("latest"))
     async def latest_cmd(message: Message):
         limit = max(1, latest_count)

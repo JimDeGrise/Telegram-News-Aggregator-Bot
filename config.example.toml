@@ -14,6 +14,7 @@ delete_from_main = false
 [telegram]
 bot_token = "PUT_YOUR_TOKEN_HERE"
 chat_id = "PUT_CHAT_OR_USER_ID_HERE"
+admin_user_id = "PUT_ADMIN_USER_ID_HERE"  # ID администратора для доступа к /start и байпасу фильтров
 
 [scheduler]
 fetch_interval_minutes = 60
@@ -28,3 +29,15 @@ page_size = 10
 search_page_size = 10
 latest_count = 10
 arc_default_limit = 10
+
+[antiflood]
+message_limit = 5  # Лимит сообщений в временном окне
+time_window = 60   # Временное окно в секундах
+warning_threshold = 3  # Количество предупреждений до мута
+mute_duration = 300    # Длительность мута в секундах
+
+[content_filter]
+# Список запрещенных слов (необязательно)
+forbidden_words = []
+# Список паттернов запрещенных ссылок в виде регулярных выражений (необязательно)
+forbidden_link_patterns = []

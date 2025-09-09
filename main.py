@@ -9,6 +9,9 @@ from feeds import FEEDS
 from db import Database
 from fetcher import collect_all
 from bot_commands import router, setup_handlers
+from handlers.antiflood import antiflood_middleware, setup_antiflood_config
+from handlers.content_filter import content_filter_middleware, setup_content_filter_config
+from handlers import commands, help
 from scheduler import setup_scheduler  # Должен использовать AsyncIOScheduler
 
 CONFIG_PATH = "config.toml"
@@ -24,6 +27,7 @@ def load_config():
         "db_path": os.getenv("DB_PATH") or data.get("database", {}).get("path", "news.db"),
         "bot_token": os.getenv("BOT_TOKEN") or data.get("telegram", {}).get("bot_token"),
         "chat_id": os.getenv("CHAT_ID") or data.get("telegram", {}).get("chat_id"),
+        "admin_user_id": os.getenv("ADMIN_USER_ID") or data.get("telegram", {}).get("admin_user_id"),
         "interval_minutes": data.get("scheduler", {}).get("fetch_interval_minutes", 60),
         "batch_limit": data.get("fetch", {}).get("batch_limit_per_feed", 0),
         "timeout_seconds": data.get("fetch", {}).get("timeout_seconds", 20),
@@ -31,11 +35,27 @@ def load_config():
         "page_size": data.get("pagination", {}).get("page_size", 10),
         "search_page_size": data.get("pagination", {}).get("search_page_size", None),
         "latest_count": data.get("pagination", {}).get("latest_count", None),
+        # Настройки антифлуда
+        "antiflood_message_limit": data.get("antiflood", {}).get("message_limit", 5),
+        "antiflood_time_window": data.get("antiflood", {}).get("time_window", 60),
+        "antiflood_warning_threshold": data.get("antiflood", {}).get("warning_threshold", 3),
+        "antiflood_mute_duration": data.get("antiflood", {}).get("mute_duration", 300),
+        # Настройки фильтра контента
+        "content_filter_forbidden_words": data.get("content_filter", {}).get("forbidden_words", []),
+        "content_filter_forbidden_links": data.get("content_filter", {}).get("forbidden_link_patterns", []),
     }
     missing = [k for k in ("bot_token", "chat_id") if not cfg[k]]
     if missing:
         raise RuntimeError(f"Отсутствуют обязательные настройки: {missing}")
     cfg["chat_id"] = int(cfg["chat_id"])
+    
+    # Преобразование admin_user_id в int если указан
+    if cfg["admin_user_id"]:
+        try:
+            cfg["admin_user_id"] = int(cfg["admin_user_id"])
+        except (ValueError, TypeError):
+            cfg["admin_user_id"] = None
+    
     return cfg
 
 
@@ -81,6 +101,24 @@ async def build_runtime():
     async def fetch_trigger():
         return await scheduled_fetch()
 
+    # Настройка конфигурации для новых обработчиков
+    setup_antiflood_config(
+        admin_id=cfg["admin_user_id"],
+        msg_limit=cfg["antiflood_message_limit"],
+        time_win=cfg["antiflood_time_window"],
+        warn_threshold=cfg["antiflood_warning_threshold"],
+        mute_dur=cfg["antiflood_mute_duration"]
+    )
+    
+    setup_content_filter_config(
+        admin_id=cfg["admin_user_id"],
+        bad_words=cfg["content_filter_forbidden_words"],
+        bad_links=cfg["content_filter_forbidden_links"]
+    )
+    
+    # Настройка админа для команд
+    commands.setup_admin(cfg["admin_user_id"])
+
     setup_handlers(
         db,
         fetch_trigger,
@@ -89,7 +127,15 @@ async def build_runtime():
         search_page_size=cfg["search_page_size"],
         latest_count=cfg["latest_count"] or cfg["page_size"],
     )
-    dp.include_router(router)
+    
+    # Подключение middleware в правильном порядке (сначала антифлуд, потом фильтр контента)
+    dp.message.middleware(antiflood_middleware)
+    dp.message.middleware(content_filter_middleware)
+    
+    # Подключение роутеров в правильном порядке
+    dp.include_router(commands.router)  # Команды /start, /ping
+    dp.include_router(help.router)      # Команда /help
+    dp.include_router(router)           # Остальные команды из bot_commands.py
 
     return cfg, bot, dp, scheduled_fetch
 
