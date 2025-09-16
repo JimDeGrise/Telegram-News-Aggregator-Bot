@@ -22,14 +22,14 @@ except ImportError:
 router = Router()
 
 HELP_TEXT = (
-    "Бот агрегирует RSS независимых медиа, доступен полнотекстовый поиск (FTS5: AND OR NOT, знак минус -, фразы в \"").\n\n"
+    "Бот агрегирует RSS независимых медиа, доступен полнотекстовый поиск (FTS5: AND OR NOT, знак минус -, фразы в \"\").\n\n"
     "Команды:\n"
     "/start — краткая справка\n"
     "/help — эта справка\n"
     "/latest — последние N (фиксированно) новостей списком с пагинацией\n"
     "/news [N] — показать одну новость (по умолчанию 1-я). N — порядковый номер (1-based)\n"
     "/filter &lt;запрос&gt; |p — поиск (p — страница). Пример: /filter кризис AND экономика |2\n"
-    "/source &lt;источник&gt; |p — новости одного источника. Пример: /source meduza |3\n"
+    "/source &lt;источник&gt; [N] — показать одну новость из источника (по умолчанию 1-я). Пример: /source meduza 5\n"
     "/sources — список источников с количеством\n"
     "/stats — текущая статистика по источникам (основная БД)\n"
     "/arc_filter [source] [YYYY-MM] [limit] — просмотр архива. Без аргументов покажет подсказку и доступные месяцы.\n"
@@ -60,6 +60,10 @@ class SourcePage(CallbackData, prefix="sp"):
     key: str
     offset: int
     limit: int
+
+class SourceNewsItem(CallbackData, prefix="sni"):
+    key: str
+    idx: int
 
 TAG_RE = re.compile(r"<[^>]+>")
 BRACKET_ENTITY_RE = re.compile(r"\[&#\d+;?\]")
@@ -312,6 +316,62 @@ def build_single_news_keyboard(item: dict, idx: int, total: int):
     buttons.append([InlineKeyboardButton(text="✖ Закрыть", callback_data="ni:close")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def build_source_single_news_text(item: dict, idx: int, total: int, source: str) -> str:
+    title = clean_text(item.get("title") or "")
+    source_clean = clean_text(source)
+    published = clean_text(item.get("published") or "")
+    summary = clean_text(item.get("summary") or "")
+    parts = [
+        f"Источник: [{source_clean}] — новость {idx+1} из {total}",
+        title,
+        published,
+        summary
+    ]
+    return safe_join(parts)
+
+def build_source_single_news_keyboard(item: dict, idx: int, total: int, key: str):
+    buttons = []
+    buttons.append([InlineKeyboardButton(text="🔗 Перейти", url=item["link"])])
+    nav_rows = []
+
+    left_row = []
+    if idx > 0:
+        left_row.append(
+            InlineKeyboardButton(
+                text="⏮ Перв.",
+                callback_data=SourceNewsItem(key=key, idx=0).pack()
+            )
+        )
+        left_row.append(
+            InlineKeyboardButton(
+                text="« Пред",
+                callback_data=SourceNewsItem(key=key, idx=idx - 1).pack()
+            )
+        )
+    if left_row:
+        nav_rows.append(left_row)
+
+    right_row = []
+    if idx < total - 1:
+        right_row.append(
+            InlineKeyboardButton(
+                text="След »",
+                callback_data=SourceNewsItem(key=key, idx=idx + 1).pack()
+            )
+        )
+        right_row.append(
+            InlineKeyboardButton(
+                text="Посл. ⏭",
+                callback_data=SourceNewsItem(key=key, idx=total - 1).pack()
+            )
+        )
+    if right_row:
+        nav_rows.append(right_row)
+
+    buttons.extend(nav_rows)
+    buttons.append([InlineKeyboardButton(text="✖ Закрыть", callback_data="sni:close")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 async def _maybe_call(func):
     try:
         if inspect.iscoroutinefunction(func):
@@ -465,7 +525,8 @@ def setup_handlers(
 
     @router.message(Command("filter"))
     async def filter_cmd(message: Message):
-        raw_part = message.text[len("/filter"):]\n        if not raw_part:
+        raw_part = message.text[len("/filter"):]
+        if not raw_part:
             await message.answer("Пустой запрос.")
             return
         page = 1
@@ -504,19 +565,25 @@ def setup_handlers(
 
     @router.message(Command("source"))
     async def source_cmd(message: Message):
-        raw_part = message.text[len("/source"):]\n        if not raw_part:
-            await message.answer("Использование: /source &lt;источник&gt; | пример: /source meduza |2")
+        raw_part = message.text[len("/source"):]
+        if not raw_part:
+            await message.answer("Использование: /source &lt;источник&gt; [N] | пример: /source meduza 5")
             return
-        page = 1
-        src = raw_part
-        if "|" in raw_part:
-            s_part, page_part = raw_part.rsplit("|", 1)
-            if page_part.strip().isdigit():
-                p = int(page_part.strip())
-                if p > 0:
-                    page = p
-                    src = s_part.strip()
-        src = src.strip()
+        
+        # Parse source and optional news number
+        parts = raw_part.strip().split()
+        if not parts:
+            await message.answer("Пустой источник.")
+            return
+        
+        src = parts[0]
+        idx_user = 1  # Default to first news item
+        if len(parts) > 1:
+            try:
+                idx_user = int(parts[1])
+            except (ValueError, TypeError):
+                idx_user = 1
+        
         if not src:
             await message.answer("Пустой источник.")
             return
@@ -540,18 +607,30 @@ def setup_handlers(
                 return
             exact = candidates[0]
 
+        total = db.total_by_source(exact)
+        if total == 0:
+            await message.answer(f"Нет новостей для источника: {clean_text(exact)}")
+            return
+        
+        # Convert to 0-based index and validate
+        idx = idx_user - 1
+        if idx < 0:
+            idx = 0
+        if idx >= total:
+            idx = total - 1
+
         norm_key = hashlib.sha1(exact.lower().encode("utf-8")).hexdigest()[:8]
         SOURCE_CACHE[norm_key] = exact
 
-        limit = search_page_size
-        offset = (page - 1) * limit
-        total = db.total_by_source(exact)
-        rows = db.source_news(exact, limit, offset)
-        total_pages = max(1, (total + limit - 1) // limit)
-        current_page = (offset // limit) + 1
-        header = f"Источник: [{exact}] (стр. {current_page}/{total_pages}, всего {total})"
-        text = build_page_text(rows, offset, limit, total, header=header)
-        kb = build_source_keyboard(rows, norm_key, offset, limit, total)
+        # Get the specific news item
+        items = db.source_news(exact, 1, idx)
+        if not items:
+            await message.answer("Нет данных.")
+            return
+        
+        item = items[0]
+        text = build_source_single_news_text(item, idx, total, exact)
+        kb = build_source_single_news_keyboard(item, idx, total, norm_key)
         await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
     @router.callback_query()
@@ -559,7 +638,7 @@ def setup_handlers(
         if not cb.data:
             return
 
-        if cb.data in {"lp:close", "fs:close", "ni:close", "sp:close"}:
+        if cb.data in {"lp:close", "fs:close", "ni:close", "sp:close", "sni:close"}:
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -660,6 +739,40 @@ def setup_handlers(
             item = items[0]
             text = build_single_news_text(item, idx, total)
             kb = build_single_news_keyboard(item, idx, total)
+            try:
+                await cb.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                await cb.message.answer(text, reply_markup=kb, disable_web_page_preview=True)
+            await cb.answer()
+            return
+
+        if cb.data.startswith("sni:"):
+            try:
+                data = SourceNewsItem.unpack(cb.data)
+            except Exception:
+                await cb.answer("Ошибка данных", show_alert=False)
+                return
+            key = data.key
+            idx = data.idx
+            if key not in SOURCE_CACHE:
+                await cb.answer("Сессия устарела. Повторите /source.", show_alert=True)
+                return
+            source = SOURCE_CACHE[key]
+            total = db.total_by_source(source)
+            if total == 0:
+                await cb.answer("Нет данных.", show_alert=False)
+                return
+            if idx < 0:
+                idx = 0
+            if idx >= total:
+                idx = total - 1
+            items = db.source_news(source, 1, idx)
+            if not items:
+                await cb.answer("Нет данных.", show_alert=False)
+                return
+            item = items[0]
+            text = build_source_single_news_text(item, idx, total, source)
+            kb = build_source_single_news_keyboard(item, idx, total, key)
             try:
                 await cb.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
             except Exception:
